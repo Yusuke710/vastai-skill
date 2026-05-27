@@ -69,8 +69,8 @@ uv tool dir
 ## What gets installed on the instance
 
 Each instance [runs a startup script](src/vastai_connect/onstart.sh) that installs:
-- [Claude Code](https://github.com/anthropics/claude-code)
-- Alias: `claude_yolo` for running `claude --dangerously-skip-permissions`
+- [Claude Code](https://claude.ai/code)
+- [Codex](https://chatgpt.com/codex)
 
 ## License 
 MIT
