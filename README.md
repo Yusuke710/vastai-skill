@@ -33,20 +33,30 @@ Then ask your agent for something that needs a GPU. e.g. Train a model on GPU et
 
 ## The workflow (what the agent does)
 
+### 1. Find and rent
+
 ```bash
-# 1. Find and rent
 vastai search offers 'gpu_name=RTX_3060 num_gpus=1 reliability>0.98' -o 'dph' --raw
 vastai create instance <offer_id> --image vastai/pytorch:latest --disk 30 --ssh --raw
+```
 
-# 2. Wait until reachable
+### 2. Wait until reachable
+
+```bash
 vastai-connect <instance_id> --alias vast-gpu        # blocks, then writes SSH alias
+```
 
-# 3. Work over plain ssh/rsync
+### 3. Work over plain ssh/rsync. This is where you iteratively run experiments on a GPU
+
+```bash
 rsync -az --filter=':- .gitignore' ./ vast-gpu:/workspace/proj/
 ssh vast-gpu 'cd /workspace/proj && uv sync && uv run python train.py'
 rsync -az vast-gpu:/workspace/proj/outputs/ ./outputs/
+```
 
-# 4. Destroy the instance
+### 4. Destroy the instance
+
+```bash
 vastai destroy instance <instance_id>                # destroy, never stop
 ```
 
@@ -76,15 +86,10 @@ across GPU tiers (July 2026):
 | RTX 5090 | $0.31 | — | — | — | ❌ 3 bad hosts (stalled downloads, broken SSH auth) |
 | GTX 1080 Ti | $0.07 | — | — | — | ❌ Pascal too old for current torch wheels |
 
-What this shows:
-
-- **Accuracy is identical across tiers** — hardware changes speed, not convergence. For
-  small experiments the RTX 3060 was ~20× cheaper per epoch than the H100.
 - **Datacenter GPUs (A100/H100) work first try**; cheap consumer hosts are a lottery
   (uncached images, old drivers, fake bandwidth) — the skill's rule is destroy and
   re-rent, never debug.
 - **GPUs older than Turing fail hard** with current PyTorch (`no kernel image`).
-- Total cost of all experiments above: **≈ $2.50**.
 
 ## License
 MIT
