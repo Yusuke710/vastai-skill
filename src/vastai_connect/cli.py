@@ -1,103 +1,69 @@
-"""Main CLI entry point for vastai-connect."""
+"""Wait for a rented vast.ai instance to be reachable, then wire up SSH access.
 
+Renting is done directly with the native vastai CLI:
+    vastai search offers 'gpu_name=RTX_3060 dph<0.15' -o 'dph' --raw
+    vastai create instance <offer_id> --image vastai/pytorch:latest --disk 30 --ssh --raw
+    vastai show instances --raw
+    vastai destroy instance <instance_id>
+
+This tool only covers the gap in between: polling until the instance is actually
+running and SSH accepts connections, writing a Host alias to ~/.ssh/config, and
+optionally opening VS Code/Cursor on it. On success it prints JSON to stdout.
+"""
+
+import argparse
+import json
 import sys
 
-import questionary
-
-from .config import get_connect_mode, get_disk_size, load_config
 from .instance import (
-    create_instance, destroy_instance, get_ssh_command, open_ide,
-    ssh_to_instance, update_ssh_config_for_instance, wait_for_instance, wait_for_ssh,
+    DEFAULT_ALIAS, get_ssh_host_port, log, open_ide,
+    update_ssh_config_for_instance, wait_for_instance, wait_for_ssh,
 )
-from .offers import filter_offers, search_offers, select_offer
 
 
 def main() -> int:
-    """Main entry point."""
-    config = load_config()
-    disk_size = get_disk_size(config)
+    parser = argparse.ArgumentParser(
+        prog="vastai-connect",
+        description="Wait until a vast.ai instance is SSH-reachable and add a Host alias "
+                    "to ~/.ssh/config. Rent/destroy instances with the vastai CLI itself.",
+    )
+    parser.add_argument("instance_id", type=int, help="Instance ID from `vastai create instance`")
+    parser.add_argument("--alias", default=DEFAULT_ALIAS,
+                        help=f"SSH config Host alias to write (default: {DEFAULT_ALIAS})")
+    parser.add_argument("--ide", choices=("code", "cursor"),
+                        help="Open this IDE on the instance once ready")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="Seconds to wait for the instance to start (default: 300)")
+    args = parser.parse_args()
 
-    # Step 1: Search and select offer
-    print("Searching for available GPU instances...")
     try:
-        offers = search_offers(disk_size)
-    except Exception as e:
-        print(f"Error: {e}\nMake sure vastai is installed and configured (run: vastai setup <your API key>)")
-        return 1
+        if not wait_for_instance(args.instance_id, args.timeout):
+            log(f"Instance {args.instance_id} did not reach 'running' state. "
+                f"Check: vastai show instances")
+            return 1
 
-    filtered = filter_offers(offers, config["gpu_types"])
-    if not filtered:
-        print(f"No offers found for GPU types: {config['gpu_types']}")
-        return 1
+        if not wait_for_ssh(args.instance_id):
+            log("SSH did not become ready. Check your SSH key at https://cloud.vast.ai/manage-keys/")
+            return 1
 
-    offer = select_offer(filtered)
-    if not offer:
+        update_ssh_config_for_instance(args.instance_id, args.alias)
+
+        if args.ide:
+            open_ide(args.ide, args.alias)
+
+        user_host, port = get_ssh_host_port(args.instance_id)
+        print(json.dumps({
+            "instance_id": args.instance_id,
+            "ssh_alias": args.alias,
+            "ssh_host": user_host,
+            "ssh_port": port,
+        }))
         return 0
-
-    # Step 2: Create instance
-    print(f"\nCreating instance with {offer.get('gpu_name', 'GPU')}...")
-    try:
-        instance_id = create_instance(offer["id"], config["image"], disk_size)
-        print(f"Instance created: {instance_id}")
-    except Exception as e:
-        print(f"Error creating instance: {e}")
-        return 1
-
-    return _run_session(instance_id, config)
-
-
-def _run_session(instance_id: int, config: dict) -> int:
-    """Run session with cleanup on exit."""
-    exit_code = 0
-    connect_mode = get_connect_mode(config)
-
-    try:
-        # Step 3: Wait for instance to be ready
-        if not wait_for_instance(instance_id):
-            print("Instance failed to start.")
-            return 1
-
-        # Step 4: Wait for SSH to be accessible
-        if not wait_for_ssh(instance_id):
-            print(f"SSH failed to become ready. Try manually: {' '.join(get_ssh_command(instance_id))}")
-            return 1
-
-        # Step 5: Always update SSH config so user can reconnect later
-        update_ssh_config_for_instance(instance_id)
-
-        # Step 6: Connect based on mode
-        print(f"\nConnecting (mode: {connect_mode})...")
-
-        if connect_mode in ("vscode", "cursor"):
-            ide_command = "code" if connect_mode == "vscode" else "cursor"
-            open_ide(ide_command)
-            input("\nPress Enter when you're finished with the IDE session...")
-        else:  # cli mode
-            exit_code = ssh_to_instance(instance_id)
-            print(f"\nSSH session ended (exit code: {exit_code})")
     except KeyboardInterrupt:
-        print("\n\nInterrupted!")
-        exit_code = 130
+        return 130
     except Exception as e:
-        print(f"\n\nUnexpected error: {e}")
-        exit_code = 1
-    finally:
-        _prompt_destroy(instance_id)
-    return exit_code
-
-
-def _prompt_destroy(instance_id: int) -> None:
-    """Prompt user to destroy instance to stop billing."""
-    if questionary.confirm("Destroy instance to stop billing?", default=True).ask():
-        print(f"Destroying instance {instance_id}...")
-        if destroy_instance(instance_id):
-            print("Instance destroyed.")
-        else:
-            print(f"Failed to destroy. Run: vastai destroy instance {instance_id}")
-    else:
-        print(f"Instance {instance_id} still running.")
-        print(f"Reconnect: {' '.join(get_ssh_command(instance_id))}")
-        print(f"Destroy: vastai destroy instance {instance_id}")
+        log(f"Error: {e}")
+        return 1
 
 
 if __name__ == "__main__":

@@ -1,53 +1,48 @@
-"""Instance management - create, wait, ssh, destroy."""
+"""The glue vast.ai's own CLI doesn't provide: readiness waiting, SSH config, IDE launch.
 
+Everything else (search offers, create, show, destroy) is done directly with `vastai`.
+"""
+
+import functools
 import json
-import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
-from .config import get_startup_script
+DEFAULT_ALIAS = "vast-gpu"
 
-SSH_CONFIG_HOST = "vast-gpu"
+# Status messages go to stderr so stdout can stay machine-readable
+log = functools.partial(print, file=sys.stderr)
 
 
-def create_instance(offer_id: int, image: str, disk_size: int) -> int:
-    """Create a new instance and return the instance ID."""
-    print(f"Creating instance with {disk_size}GB disk...")
-    onstart_cmd = get_startup_script()
-
+def get_ssh_host_port(instance_id: int) -> tuple[str, str]:
+    """Return (user@host, port) for an instance, from `vastai ssh-url`."""
     result = subprocess.run(
-        [
-            "vastai",
-            "create",
-            "instance",
-            str(offer_id),
-            "--image",
-            image,
-            "--disk",
-            str(disk_size),
-            "--onstart-cmd",
-            onstart_cmd,
-            "--ssh",
-            "--raw",
-        ],
+        ["vastai", "ssh-url", str(instance_id)],
         capture_output=True,
         text=True,
     )
 
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to create instance: {result.stderr}")
+        raise RuntimeError(f"Failed to get SSH URL: {result.stderr}")
 
-    # Parse the response to get instance ID
-    data = json.loads(result.stdout)
-    if "new_contract" in data:
-        return data["new_contract"]
-    raise RuntimeError(f"Unexpected response: {result.stdout}")
+    ssh_url = result.stdout.strip()  # e.g. ssh://root@ssh6.vast.ai:17538
+    if not ssh_url.startswith("ssh://"):
+        raise RuntimeError(f"Unexpected ssh-url output: {ssh_url!r}")
+    user_host, port = ssh_url.removeprefix("ssh://").rsplit(":", 1)
+    return user_host, port
+
+
+def get_ssh_command(instance_id: int) -> list[str]:
+    """Get the SSH command for connecting to an instance."""
+    user_host, port = get_ssh_host_port(instance_id)
+    return ["ssh", "-p", port, user_host]
 
 
 def wait_for_instance(instance_id: int, timeout: int = 300) -> bool:
     """Wait for instance to be running. Returns True when ready."""
-    print(f"Waiting for instance {instance_id} to start...", end="", flush=True)
+    log(f"Waiting for instance {instance_id} to start...", end="", flush=True)
     start_time = time.time()
 
     while time.time() - start_time < timeout:
@@ -63,44 +58,19 @@ def wait_for_instance(instance_id: int, timeout: int = 300) -> bool:
                 if instance.get("id") == instance_id:
                     status = instance.get("actual_status", "")
                     if status == "running":
-                        print(" Ready!")
+                        log(" Ready!")
                         return True
 
-        print(".", end="", flush=True)
+        log(".", end="", flush=True)
         time.sleep(5)
 
-    print(" Timeout!")
+    log(" Timeout!")
     return False
-
-
-def get_ssh_command(instance_id: int) -> list[str]:
-    """Get the SSH command for connecting to an instance."""
-    result = subprocess.run(
-        ["vastai", "ssh-url", str(instance_id)],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to get SSH URL: {result.stderr}")
-
-    # Output is like: ssh://root@ssh6.vast.ai:17538
-    ssh_url = result.stdout.strip()
-
-    # Parse ssh:// URL into ssh command args
-    if ssh_url.startswith("ssh://"):
-        # ssh://root@ssh6.vast.ai:17538 -> ssh -p 17538 root@ssh6.vast.ai
-        url = ssh_url[6:]  # Remove "ssh://"
-        user_host, port = url.rsplit(":", 1)
-        return ["ssh", "-p", port, user_host]
-
-    # Fallback: assume it's already in "ssh -p PORT user@host" format
-    return ssh_url.split()
 
 
 def wait_for_ssh(instance_id: int, timeout: int = 180) -> bool:
     """Wait for SSH to be actually accessible. Returns True when ready."""
-    print("Waiting for SSH to be ready...", end="", flush=True)
+    log("Waiting for SSH to be ready...", end="", flush=True)
     start_time = time.time()
 
     while time.time() - start_time < timeout:
@@ -112,93 +82,80 @@ def wait_for_ssh(instance_id: int, timeout: int = 180) -> bool:
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                print(" Ready!")
+                log(" Ready!")
                 return True
             if "Permission denied" in result.stderr:
-                print(" Authentication failed! Check your SSH key configuration.")
+                log(" Authentication failed! Check your SSH key configuration.")
                 return False
         except Exception:
             pass
-        print(".", end="", flush=True)
+        log(".", end="", flush=True)
         time.sleep(3)
 
-    print(" Timeout!")
+    log(" Timeout!")
     return False
 
 
-def ssh_to_instance(instance_id: int) -> int:
-    """SSH into the instance. Returns the exit code."""
-    ssh_cmd = get_ssh_command(instance_id)
-    print(f"Connecting: {' '.join(ssh_cmd)}")
-
-    # Use subprocess.call to let SSH take over the terminal
-    return subprocess.call(ssh_cmd)
+VASTAI_CONF = Path.home() / ".ssh" / "vastai.conf"
+INCLUDE_LINE = "Include ~/.ssh/vastai.conf"
 
 
-def destroy_instance(instance_id: int) -> bool:
-    """Destroy an instance. Returns True on success."""
-    result = subprocess.run(
-        ["vastai", "destroy", "instance", str(instance_id)],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+def _ensure_include() -> None:
+    """One-time edit of ~/.ssh/config: include vastai.conf."""
+    ssh_dir = VASTAI_CONF.parent
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    config = ssh_dir / "config"
+    text = config.read_text() if config.exists() else ""
+    if INCLUDE_LINE not in text:
+        config.write_text(f"{INCLUDE_LINE}\n\n{text}")
+        config.chmod(0o600)
+        log(f"Added '{INCLUDE_LINE}' to {config}")
 
 
-def update_ssh_config_for_instance(instance_id: int) -> None:
-    """Update ~/.ssh/config with instance details for easy reconnection."""
-    ssh_cmd = get_ssh_command(instance_id)
-    # ssh_cmd is like: ["ssh", "-p", "17538", "root@ssh6.vast.ai"]
-    port = ssh_cmd[2]
-    user, host = ssh_cmd[3].split("@")
+def update_ssh_config_for_instance(instance_id: int, alias: str = DEFAULT_ALIAS) -> None:
+    """Write the instance's Host alias to ~/.ssh/vastai.conf (owned by this tool).
 
-    # Validate inputs (no whitespace/newlines that could inject config)
-    for name, val in [("host", host), ("user", user), ("port", port)]:
-        if not val or any(c in val for c in " \t\n\r"):
+    ~/.ssh/config itself is only touched once, to add the Include line.
+    """
+    user_host, port = get_ssh_host_port(instance_id)
+    user, host = user_host.split("@")
+
+    # Whitespace in any value could inject extra config directives
+    for name, val in [("alias", alias), ("host", host), ("port", port), ("user", user)]:
+        if not val or any(c.isspace() for c in val):
             raise ValueError(f"Invalid SSH {name}: {val!r}")
 
-    ssh_dir = Path.home() / ".ssh"
-    ssh_dir.mkdir(mode=0o700, exist_ok=True)
-    config_path = ssh_dir / "config"
-    tmp_path = ssh_dir / "config.tmp"
+    _ensure_include()
 
-    new_block = f"""Host {SSH_CONFIG_HOST}
-    HostName {host}
-    Port {port}
-    User {user}
-    StrictHostKeyChecking accept-new
-"""
+    # One block per alias: keep other aliases, replace this one
+    old = VASTAI_CONF.read_text() if VASTAI_CONF.exists() else ""
+    blocks = [b.strip() for b in old.split("\n\n") if b.strip()]
+    blocks = [b for b in blocks if b.splitlines()[0] != f"Host {alias}"]
+    blocks.append(
+        f"Host {alias}\n"
+        f"    HostName {host}\n"
+        f"    Port {port}\n"
+        f"    User {user}\n"
+        f"    StrictHostKeyChecking accept-new"
+    )
+    VASTAI_CONF.write_text("\n\n".join(blocks) + "\n")
+    VASTAI_CONF.chmod(0o600)
 
-    if config_path.exists():
-        content = config_path.read_text()
-        pattern = rf"Host {SSH_CONFIG_HOST}\n(?:[ \t]+\S+.*\n)*"
-        if re.search(pattern, content):
-            content = re.sub(pattern, new_block, content)
-        else:
-            content = content.rstrip() + "\n\n" + new_block
-    else:
-        content = new_block
-
-    # Atomic write + always enforce permissions
-    tmp_path.write_text(content)
-    tmp_path.chmod(0o600)
-    tmp_path.rename(config_path)
-
-    print(f"SSH config updated: ssh {SSH_CONFIG_HOST}")
+    log(f"SSH alias ready: ssh {alias}  ({VASTAI_CONF})")
 
 
-def open_ide(ide_command: str) -> bool:
+def open_ide(ide_command: str, alias: str = DEFAULT_ALIAS) -> bool:
     """Open IDE with remote SSH connection. Returns True on success.
 
     Assumes update_ssh_config_for_instance() was already called.
     """
     # Use SSH config alias - VS Code reads port from config
-    cmd = [ide_command, "--remote", f"ssh-remote+{SSH_CONFIG_HOST}", "/root"]
+    cmd = [ide_command, "--remote", f"ssh-remote+{alias}", "/root"]
 
-    print(f"Opening {ide_command}: {' '.join(cmd)}")
+    log(f"Opening {ide_command}: {' '.join(cmd)}")
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except FileNotFoundError:
-        print(f"Error: '{ide_command}' not found. Install it or add to PATH.")
+        log(f"Error: '{ide_command}' not found. Install it or add to PATH.")
         return False

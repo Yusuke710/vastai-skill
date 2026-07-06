@@ -1,76 +1,90 @@
-# vastai-connect
+# vastai-skill
 
-CLI wrapper for [Vast.ai](https://vast.ai) that simplifies GPU rental workflow. One command to search GPU, rent, ssh, then destroy the instance afterward.
+GPU experiments on [Vast.ai](https://vast.ai), run by AI coding agents.
 
-## Installation
+An agent rents a GPU with the native `vastai` CLI, works on it over plain `ssh`/`rsync`,
+and destroys it when done. This repo provides the two missing pieces:
+
+- **[`skills/vastai-gpu.md`](skills/vastai-gpu.md)** — the skill that teaches an agent the
+  full workflow: find/rent → connect → sync/run → transfer artifacts → destroy.
+- **`vastai-connect <instance_id>`** — the one gap the native CLI leaves: blocks until a
+freshly rented instance is actually SSH-reachable, then writes a `Host` alias to its own
+`~/.ssh/vastai.conf` (auto-included from `~/.ssh/config`, which is never touched again).
+Optionally opens VS Code/Cursor with `--ide`.
+
+## Setup (once, by a human)
 
 ```bash
-# Install vastai CLI first
+# 1. Native vastai CLI + API key (from https://cloud.vast.ai/manage-keys/)
 uv tool install vastai
-vastai set api-key <Enter your API key from https://cloud.vast.ai/manage-keys/>
+vastai set api-key <key>
 
-# Install vastai-connect
+# 2. Register your SSH public key at https://cloud.vast.ai/manage-keys/
+
+# 3. This tool
 uv tool install git+https://github.com/Yusuke710/vastai-connect.git
 
-# Update to latest version
-uv tool upgrade vastai-connect
+# 4. The skill (Claude Code)
+ln -s "$(pwd)/skills/vastai-gpu.md" ~/.claude/skills/vastai-gpu.md
+# or ask your agent to add this skill
 ```
 
-## SSH Key Setup
+Then ask your agent for something that needs a GPU. e.g. Train a model on GPU etc
 
-Add your SSH public key to Vast.ai so you can connect to instances:
-
-1. Copy your public key: `cat ~/.ssh/<your public key>.pub` or generate your own.
-2. Go to https://cloud.vast.ai/manage-keys/ → SSH Keys section
-3. Paste your public key and save
-
-## Usage
+## The workflow (what the agent does)
 
 ```bash
-vastai-connect
+# 1. Find and rent
+vastai search offers 'gpu_name=RTX_3060 num_gpus=1 reliability>0.98' -o 'dph' --raw
+vastai create instance <offer_id> --image vastai/pytorch:latest --disk 30 --ssh --raw
+
+# 2. Wait until reachable
+vastai-connect <instance_id> --alias vast-gpu        # blocks, then writes SSH alias
+
+# 3. Work over plain ssh/rsync
+rsync -az --filter=':- .gitignore' ./ vast-gpu:/workspace/proj/
+ssh vast-gpu 'cd /workspace/proj && uv sync && uv run python train.py'
+rsync -az vast-gpu:/workspace/proj/outputs/ ./outputs/
+
+# 4. Destroy the instance
+vastai destroy instance <instance_id>                # destroy, never stop
 ```
 
-This will:
-1. Show available GPU instances (arrow key selection)
-2. Create the selected instance
-3. Wait for it to be ready
-4. SSH into the instance
-5. On exit, prompt to destroy the instance (default: yes)
+Details (long-running jobs, GPU verification, failure handling, cost rules) live in
+[the skill](skills/vastai-gpu.md).
 
-### Environment Variable Overrides
+## Connecting your IDE (optional, for humans)
 
-Override config without editing the file:
+Since the instance gets a plain SSH alias, VS Code or Cursor can attach to it with their
+[Remote - SSH](https://code.visualstudio.com/docs/remote/ssh) extension — pick the alias
+(e.g. `vast-gpu`) from the remote host list, or let the tool open it for you:
 
 ```bash
-# Use VS Code instead of CLI
-VAST_MODE=vscode vastai-connect
-
-# Use Cursor instead of CLI
-VAST_MODE=cursor vastai-connect
-
-# Set disk size in GB (default: 10GB, cannot be resized after creation)
-VAST_DISK=100 vastai-connect
-
-# Combine options
-VAST_MODE=vscode VAST_DISK=200 vastai-connect
+vastai-connect <instance_id> --ide code     # or --ide cursor
 ```
 
-## Configuration
+## Validated end to end
 
-The config file is bundled with the package. To find and edit it:
+ResNet-18 trained from scratch on Imagenette-160 by a coding agent following the skill,
+across GPU tiers (July 2026):
 
-```bash
-# Find config location
-uv tool dir
-# Then edit: <tool_dir>/vastai-connect/lib/python3.x/site-packages/vastai_connect/default_config.yaml
-```
+| GPU | $/hr | Boot→SSH | Epoch | Best val acc | Outcome |
+|---|---|---|---|---|---|
+| H100 SXM 80GB | $2.00 | <1 min | 3.9 s | 77.2% | ✅ first try |
+| A100 SXM4 80GB | $0.50 | ~2 min | 3.9 s | 77.8–78.0% | ✅ first try|
+| RTX 3060 | $0.05 | ~6 min | 8.0 s | 77.5% | ✅ after 2 host re-rents |
+| RTX 5090 | $0.31 | — | — | — | ❌ 3 bad hosts (stalled downloads, broken SSH auth) |
+| GTX 1080 Ti | $0.07 | — | — | — | ❌ Pascal too old for current torch wheels |
 
+What this shows:
 
-## What gets installed on the instance
+- **Accuracy is identical across tiers** — hardware changes speed, not convergence. For
+  small experiments the RTX 3060 was ~20× cheaper per epoch than the H100.
+- **Datacenter GPUs (A100/H100) work first try**; cheap consumer hosts are a lottery
+  (uncached images, old drivers, fake bandwidth) — the skill's rule is destroy and
+  re-rent, never debug.
+- **GPUs older than Turing fail hard** with current PyTorch (`no kernel image`).
+- Total cost of all experiments above: **≈ $2.50**.
 
-Each instance [runs a startup script](src/vastai_connect/onstart.sh) that installs:
-- [Claude Code](https://claude.ai/code)
-- [Codex](https://chatgpt.com/codex)
-
-## License 
+## License
 MIT

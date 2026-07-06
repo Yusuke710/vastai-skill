@@ -1,15 +1,13 @@
 [project]
 name = "vastai-connect"
 version = "0.1.0"
-description = "CLI wrapper for vastai - simplifies GPU rental workflow"
+description = "Wait for a vast.ai instance to be SSH-reachable and wire up ~/.ssh/config"
 readme = "README.md"
 authors = [
     { name = "Yusuke710", email = "youfu1202mo@gmail.com" }
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "pyyaml>=6.0.3",
-    "questionary>=2.1.1",
     "vastai>=0.5.0",
 ]
 
