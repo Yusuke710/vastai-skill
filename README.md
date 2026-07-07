@@ -5,7 +5,7 @@ GPU experiments on [Vast.ai](https://vast.ai), run by AI coding agents.
 An agent rents a GPU with the native `vastai` CLI, works on it over plain `ssh`/`rsync`,
 and destroys it when done. This repo provides the two missing pieces:
 
-- **[`skills/vastai-gpu.md`](skills/vastai-gpu.md)** — the skill that teaches an agent the
+- **[`skills/vastai-gpu/SKILL.md`](skills/vastai-gpu/SKILL.md)** — the skill that teaches an agent the
   full workflow: find/rent → connect → sync/run → transfer artifacts → destroy.
 - **`vastai-connect <instance_id>`** — the one gap the native CLI leaves: blocks until a
 freshly rented instance is actually SSH-reachable, then writes a `Host` alias to its own
@@ -24,8 +24,11 @@ vastai set api-key <key>
 # 3. This tool
 uv tool install git+https://github.com/Yusuke710/vastai-connect.git
 
-# 4. The skill (Claude Code)
-ln -s "$(pwd)/skills/vastai-gpu.md" ~/.claude/skills/vastai-gpu.md
+# 4. The skill — same SKILL.md works for both agents; symlink it where yours looks.
+#    Claude Code:
+ln -s "$(pwd)/skills/vastai-gpu" ~/.claude/skills/vastai-gpu
+#    Codex:
+ln -s "$(pwd)/skills/vastai-gpu" ~/.agents/skills/vastai-gpu
 # or ask your agent to add this skill
 ```
 
@@ -61,7 +64,7 @@ vastai destroy instance <instance_id>                # destroy, never stop
 ```
 
 Details (long-running jobs, GPU verification, failure handling, cost rules) live in
-[the skill](skills/vastai-gpu.md).
+[the skill](skills/vastai-gpu/SKILL.md).
 
 ## Connecting your IDE (optional, for humans)
 
