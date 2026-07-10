@@ -15,85 +15,52 @@ from the moment an instance is created until it is **destroyed**. Never leave on
 vastai show instances --raw   # errors if vastai isn't installed or the API key isn't set
 ```
 
-If missing, ask user to registered public SSH key at https://cloud.vast.ai/manage-keys/) and get vast ai api key. 
-Run `uv tool install vastai && vastai set api-key <key>` and `uv tool install git+https://github.com/Yusuke710/vastai-connect.git` to install required software to run this skill. 
+If missing: have the user register a public SSH key and create an API key at
+https://cloud.vast.ai/manage-keys/, then:
+
+```bash
+uv tool install vastai && vastai set api-key <key>
+uv tool install git+https://github.com/Yusuke710/vastai-skill.git
+```
 
 ## 1. Find and rent
 
 ```bash
 # Cheapest matching offers first. GPU names use underscores: RTX_3060, RTX_4090, A100_SXM4...
 vastai search offers 'gpu_name=RTX_3060 num_gpus=1 reliability>0.98 dph<0.45' -o 'dph' --raw
-```
 
-Pick the cheapest offer's `id` and note its `dph_total` ($/hr). Sanity-check the price against
-what the task deserves before renting. Then:
-
-```bash
 vastai create instance <offer_id> --image vastai/pytorch:latest --disk 30 --ssh --raw
 # → {"success": true, "new_contract": <instance_id>}
 ```
 
+- Sanity-check the offer's `dph_total` ($/hr) against what the task deserves before renting.
+- **Image:** default to `vastai/pytorch:latest` — its CUDA base layers are cached on most
+  vast.ai hosts (boot-to-SSH ≈ 2–3 min). Other images usually download cold.
 - `--disk` cannot be resized later; size it for datasets + checkpoints.
-- **Image choice:** default to `vastai/pytorch:latest`. Its CUDA base layers are cached on
-most vast.ai hosts (boot-to-SSH ≈ 2–3 min). Alternatives only when justified.
-
-If running more than one instance, label each so `vastai show instances` stays legible:
-
-```bash
-vastai label instance <instance_id> exp1
-```
+- The `new_contract` value is your instance id — the only instance you own.
+- Running several instances? `vastai label instance <id> <name>` and use a distinct
+  `--alias` for each.
 
 ## 2. Wait until reachable
 
 ```bash
-vastai-connect <instance_id>  --alias vast-gpu # blocks until SSH works; makes `ssh vast-gpu` usable
-# → {"instance_id": ..., "ssh_alias": "vast-gpu", ...}
+vastai-connect <instance_id> --alias vast-gpu  # blocks until SSH works; then `ssh vast-gpu` / rsync work
 ```
 
-Use `--alias vast-<name>` when running several instances. Typical wait is 1–3 minutes.
-On timeout (5 min default) or any stall later (crawling downloads, broken SSH auth), destroy and rent a different offer. Re-renting beats debugging. Cheap consumer hosts are a lottery and Datacenter GPUs (A100/H100) are usually more reliable.
+Typical wait is 1–3 minutes. On timeout (5 min default) or any stall later (crawling
+downloads, broken SSH auth): destroy and rent a different offer — re-renting beats
+debugging. Cheap consumer hosts are a lottery; datacenter GPUs (A100/H100) are usually
+more reliable.
 
 ## 3. Work over plain ssh/rsync
 
-```bash
-# Sync code (gitignore-filtered so .venv/data/checkpoints don't cross the wire)
-rsync -az --filter=':- .gitignore' ./ vast-gpu:/workspace/proj/
+Normal remote-Linux workflow from here — nothing vast.ai-specific. Reminders, not recipes:
 
-# Install dependencies
-ssh vast-gpu 'cd /workspace/proj && uv sync'
-
-ssh vast-gpu 'cd /workspace/proj && uv run python train.py'
-
-# Iterate: edit locally, re-sync (delta = ~1s), re-run
-```
-
-A GPU-verify one-liner after `uv sync — uv run python -c "import torch; torch.randn(1, device='cuda')"` — one cheap command that catches both hard-fail modes we hit (old driver → silent CPU fallback; old GPU → no kernel image) before any money is spent on a long run.
-
-**Long jobs** (anything that could outlive a shell timeout):
-
-```bash
-# 1. Launch detached with an exit-code sentinel. nohup means the job survives SSH
-#    drops and your session ending; job.exit records success (0) vs crash.
-ssh vast-gpu 'cd /workspace/proj && rm -f job.exit && nohup bash -c \
-  "uv run python train.py; echo \$? > job.exit" > train.log 2>&1 & echo started'
-
-# 2. Start a blocking waiter as a background task in your harness — it exits the
-#    moment the job finishes and reports the exit code (push, not poll):
-ssh -o ServerAliveInterval=30 vast-gpu \
-  'until [ -f /workspace/proj/job.exit ]; do sleep 15; done; \
-   echo "exit=$(cat /workspace/proj/job.exit)"; tail -5 /workspace/proj/train.log'
-
-# Check training progress anytime while waiting:
-ssh vast-gpu 'tail -n 50 /workspace/proj/train.log'
-```
-
-If the waiter dies (SSH proxy hiccup), the sentinel file is still there — just rerun it.
-Don't run training as a plain ssh command without nohup: if the connection drops, the
-job dies with it.
-
-**Before destroying:** the user may want to keep artifacts (model weights, logs, results)
-that only exist on the instance. Check with the user, then transfer anything worth keeping —
-e.g. `rsync -az vast-gpu:/workspace/proj/outputs/ ./outputs/`.
+- rsync the project over gitignore-filtered so junk (.venv, data) doesn't cross the wire.
+- Sanity-check that torch actually sees the GPU before paying for a long run.
+- Detach long jobs so they survive SSH drops, and capture the exit code.
+- **Before destroying**, pull back artifacts worth keeping (weights, logs, results) —
+  they exist only on the instance. Check with the user if unsure what to keep.
 
 ## 4. Destroy the instance
 
@@ -103,5 +70,9 @@ vastai show instances --raw              # verify it's gone; [] means nothing is
 ```
 
 - **Destroy, never `stop`** — stopped instances still bill storage and may be unable to restart.
+- **Only destroy instance ids you created in this session** (the `new_contract` values you
+  received). Other instances — even ones with a familiar label or the same image — may
+  belong to another job or agent running in parallel. Report unknown instances to the
+  user; never "clean them up".
 - If you intentionally leave an instance running (e.g. a long training job), tell the user
   explicitly: instance id, $/hr, and how to destroy it.

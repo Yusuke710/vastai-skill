@@ -22,7 +22,7 @@ vastai set api-key <key>
 # 2. Register your SSH public key at https://cloud.vast.ai/manage-keys/
 
 # 3. This tool
-uv tool install git+https://github.com/Yusuke710/vastai-connect.git
+uv tool install git+https://github.com/Yusuke710/vastai-skill.git
 
 # 4. The skill — same SKILL.md works for both agents; symlink it where yours looks.
 #    Claude Code:
